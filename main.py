@@ -1,3 +1,5 @@
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
@@ -124,8 +126,39 @@ except Exception:
 
 # ================= SCRAPING =================
 url = "https://thor.organojudicial.gob.bo/"
-response = requests.get(url)
-html_content = response.text
+
+@st.cache_data(ttl=600)  # cache 10 min (evita pedir a cada rerun)
+def descargar_html(url: str) -> str:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+        "Accept-Language": "es-BO,es;q=0.9,en;q=0.8",
+    }
+
+    s = requests.Session()
+    retries = Retry(
+        total=4,
+        backoff_factor=1,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=("GET",),
+    )
+    s.mount("https://", HTTPAdapter(max_retries=retries))
+
+    r = s.get(url, headers=headers, timeout=(15, 60))  # (connect, read)
+    r.raise_for_status()
+    return r.text
+
+try:
+    html_content = descargar_html(url)
+except requests.exceptions.RequestException as e:
+    st.error("⚠️ No se pudo conectar con 'thor.organojudicial.gob.bo' desde Streamlit Cloud. "
+             "Puede ser lentitud del sitio o bloqueo por IP/GeoIP.")
+    if st.button("🔄 Reintentar conexión"):
+        descargar_html.clear()
+        st.rerun()
+    st.stop()
+
+
+
 soup = BeautifulSoup(html_content, 'html.parser')
 remates = soup.find_all('li', class_='clearfix')
 
