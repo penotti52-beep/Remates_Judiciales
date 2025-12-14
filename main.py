@@ -9,12 +9,6 @@ import re
 import locale
 import base64  # Para mostrar el logo centrado
 
-# --- NUEVO: fallback + diagnóstico ---
-from pathlib import Path
-import socket
-import traceback
-
-
 # ================= CONFIG APP =================
 st.set_page_config(
     layout="wide",
@@ -116,10 +110,15 @@ st.markdown("""
         margin-left: 2px;
         border-radius: 2px;
     }
-    .franja.rojo    { background-color: #d01c1f; }
-    .franja.amarillo{ background-color: #ffd600; }
-    .franja.verde   { background-color: #007a33; }
-
+    .franja.rojo {
+        background-color: #d01c1f;
+    }
+    .franja.amarillo{
+        background-color: #ffd600;
+    }
+    .franja.verde {
+        background-color: #007a33;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -129,87 +128,42 @@ try:
 except Exception:
     pass
 
-
-# ================= SCRAPING (MEJORADO PARA STREAMLIT CLOUD) =================
+# ================= SCRAPING =================
 url = "https://thor.organojudicial.gob.bo/"
-CACHE_FILE = Path("/tmp/thor_cache.html")  # Streamlit Cloud permite escribir en /tmp
 
-
-@st.cache_data(ttl=600, show_spinner=False)  # cache 10 min (evita pedir a cada rerun)
-def descargar_html_online(url: str) -> str:
+@st.cache_data(ttl=600)  # cache 10 min (evita pedir a cada rerun)
+def descargar_html(url: str) -> str:
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
-        ),
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
         "Accept-Language": "es-BO,es;q=0.9,en;q=0.8",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Connection": "close",
     }
-
     s = requests.Session()
     retries = Retry(
         total=4,
-        connect=4,
-        read=4,
         backoff_factor=1,
         status_forcelist=(429, 500, 502, 503, 504),
         allowed_methods=("GET",),
-        raise_on_status=False,
-        respect_retry_after_header=True,
     )
     s.mount("https://", HTTPAdapter(max_retries=retries))
-
-    r = s.get(url, headers=headers, timeout=(25, 90))  # (connect, read)
+    r = s.get(url, headers=headers, timeout=(15, 60))  # (connect, read)
     r.raise_for_status()
     return r.text
 
-
-def obtener_html_con_fallback(url: str) -> str:
-    try:
-        html = descargar_html_online(url)
-
-        # Guardar caché local (último HTML bueno)
-        CACHE_FILE.write_text(html, encoding="utf-8", errors="ignore")
-        st.session_state["thor_cache_ts"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-        return html
-
-    except Exception as e:
-        # Mostrar diagnóstico (para ver el error real en Cloud)
-        with st.expander("🧪 Diagnóstico (solo si falla)"):
-            try:
-                st.write("DNS:", socket.gethostbyname("thor.organojudicial.gob.bo"))
-            except Exception as dns_e:
-                st.write("DNS error:", repr(dns_e))
-            st.write("Excepción:", repr(e))
-            st.code("".join(traceback.format_exception(type(e), e, e.__traceback__)))
-
-        # Fallback a caché si existe
-        if CACHE_FILE.exists():
-            ts = st.session_state.get("thor_cache_ts", "sin fecha")
-            st.warning(f"⚠️ THOR no respondió. Usando caché local (última descarga: {ts}).")
-            return CACHE_FILE.read_text(encoding="utf-8", errors="ignore")
-
-        # Si no hay caché, detenemos (no hay con qué continuar)
-        st.error("⚠️ No se pudo conectar con 'thor.organojudicial.gob.bo' desde Streamlit Cloud. "
-                 "Puede ser lentitud del sitio o bloqueo por IP/GeoIP.")
-        if st.button("🔄 Reintentar conexión"):
-            descargar_html_online.clear()
-            try:
-                CACHE_FILE.unlink(missing_ok=True)
-            except Exception:
-                pass
-            st.rerun()
-        st.stop()
-
-
-html_content = obtener_html_con_fallback(url)
+try:
+    html_content = descargar_html(url)
+except requests.exceptions.RequestException as e:
+    st.error(
+        "⚠️ No se pudo conectar con 'thor.organojudicial.gob.bo' desde Streamlit Cloud. "
+        "Puede ser lentitud del sitio o bloqueo por IP/GeoIP."
+    )
+    if st.button("🔄 Reintentar conexión"):
+        descargar_html.clear()
+        st.rerun()
+    st.stop()
 
 soup = BeautifulSoup(html_content, 'html.parser')
 remates = soup.find_all('li', class_='clearfix')
 
-
-# ================= PARSEO =================
 tipos_inmuebles = []
 valores = []
 fechas_publicacion = []
@@ -222,34 +176,30 @@ descripciones = []
 
 patron = r"(\d{1,2}) de (\w+) de (\d{4})"
 
-
 def extraer_fecha(fecha_str: str):
     match = re.search(patron, fecha_str)
     if match:
         dia, mes, anio = match.groups()
         try:
             fecha_formateada = datetime.strptime(
-                f"{dia} {mes} {anio}", "%d %B %Y"
+                f"{dia} {mes} {anio}",
+                "%d %B %Y"
             ).strftime("%d/%m/%Y")
             return fecha_formateada
         except Exception:
             return None
     return None
 
-
 def limpiar_descripcion(descripcion: str):
     return descripcion.replace('Descripción:Tipo Inmueble ', '')
-
 
 def limpiar_valor(valor: str):
     valor_limpio = valor.replace('Valor Original: ', '').split('Empoce:')[0].strip()
     return valor_limpio
 
-
 def limpiar_juzgado(juzgado: str):
     juzgado_limpio = juzgado.replace('Juzgado N° ', '').replace('Juzgado Público', '').strip()
     return juzgado_limpio
-
 
 def extraer_ciudad(ubicacion: str):
     """Toma la última parte de la ubicación como ciudad (después de '-' o ',')."""
@@ -259,51 +209,21 @@ def extraer_ciudad(ubicacion: str):
     parte = parte.split(',')[-1]
     return parte.strip()
 
-
 for remate in remates:
-    try:
-        tipo_inmueble = remate.find('strong', class_='primary-font').text.strip()
-    except Exception:
-        tipo_inmueble = "No disponible"
+    tipo_inmueble = remate.find('strong', class_='primary-font').text.strip()
+    valor = remate.find('i', class_='fa-money').text.strip()
+    fecha_publicacion = remate.find('small', class_='pull-right').text.strip()
+    juzgado = remate.find('i', class_='fa-university').text.strip()
+    ubicacion = remate.find('i', class_='fa-map-marker').text.strip()
+    numero_proceso = remate.find('i', class_='fa-server').text.split('N° Proceso: ')[-1].strip()
 
-    try:
-        valor = remate.find('i', class_='fa-money').text.strip()
-    except Exception:
-        valor = "No disponible"
-
-    try:
-        fecha_publicacion = remate.find('small', class_='pull-right').text.strip()
-    except Exception:
-        fecha_publicacion = "No disponible"
-
-    try:
-        juzgado = remate.find('i', class_='fa-university').text.strip()
-    except Exception:
-        juzgado = "No disponible"
-
-    try:
-        ubicacion = remate.find('i', class_='fa-map-marker').text.strip()
-    except Exception:
-        ubicacion = "No disponible"
-
-    # Número de proceso (seguro)
-    try:
-        nodo_proc = remate.find('i', class_='fa-server')
-        numero_proceso = nodo_proc.text.split('N° Proceso: ')[-1].strip() if nodo_proc else "No disponible"
-    except Exception:
-        numero_proceso = "No disponible"
-
-    # Descripción (con tu lógica actual)
     descripcion = remate.find('i', class_='fa-server')
     descripcion_texto = descripcion.text.strip() if descripcion else "Descripción no disponible"
     descripcion_limpia = limpiar_descripcion(descripcion_texto)
 
     rebaja_value = '0%'
-    if isinstance(valor, str) and 'Rebaja' in valor:
-        try:
-            rebaja_value = valor.split('Rebaja: ')[-1].split('%')[0] + '%'
-        except Exception:
-            rebaja_value = '0%'
+    if 'Rebaja' in valor:
+        rebaja_value = valor.split('Rebaja: ')[-1].split('%')[0] + '%'
 
     fecha_str = extraer_fecha(fecha_publicacion)
 
@@ -312,7 +232,6 @@ for remate in remates:
         fecha_remate = datetime.strptime(fecha_str, "%d/%m/%Y")
         diff = fecha_remate - datetime.now()
         days_left = diff.days
-
         if days_left <= 2:
             iconos.append('🟥')
         elif 3 <= days_left <= 7:
@@ -326,8 +245,8 @@ for remate in remates:
     except Exception:
         iconos.append('🟦')
 
-    valor_limpio = limpiar_valor(valor) if isinstance(valor, str) else "No disponible"
-    juzgado_limpio = limpiar_juzgado(juzgado) if isinstance(juzgado, str) else "No disponible"
+    valor_limpio = limpiar_valor(valor)
+    juzgado_limpio = limpiar_juzgado(juzgado)
 
     tipos_inmuebles.append(tipo_inmueble)
     valores.append(valor_limpio)
@@ -338,11 +257,9 @@ for remate in remates:
     rebaja.append(rebaja_value)
     descripciones.append(descripcion_limpia)
 
-
 # --------- FAVORITOS en Session State ---------
 if 'favoritos' not in st.session_state:
     st.session_state['favoritos'] = []
-
 
 # ================= DATAFRAME BASE =================
 data = {
@@ -356,16 +273,14 @@ data = {
     'Número de Proceso': numeros_proceso,
     'Rebaja': rebaja
 }
-df = pd.DataFrame(data)
 
+df = pd.DataFrame(data)
 df['FechaFormateada'] = df['Fecha de Remate del Inmueble'].apply(extraer_fecha)
 df['FechaDate'] = pd.to_datetime(df['FechaFormateada'], format="%d/%m/%Y", errors="coerce")
 df['Ciudad'] = df['Ubicación'].apply(extraer_ciudad)
 
-
 # ================= SIDEBAR: LEYENDA + FILTROS =================
 st.sidebar.markdown("### Leyenda de colores")
-
 st.sidebar.markdown(
     "🟥 **Rojo**<br/>"
     "Menor o igual a 2 días para el remate.",
@@ -386,7 +301,6 @@ st.sidebar.markdown(
     "Más de 2 semanas para el remate.",
     unsafe_allow_html=True
 )
-
 st.sidebar.markdown("---")
 st.sidebar.markdown("### Filtros")
 
@@ -427,7 +341,7 @@ if pd.notnull(min_fecha) and pd.notnull(max_fecha):
         fecha_ini, fecha_fin = min_fecha.date(), max_fecha.date()
 
 # Aplicar filtros básicos (tipo inmueble y ciudad)
-df_filtered = df[df['Tipo de Inmueble'].str.contains('INMUEBLE', case=False, na=False)]
+df_filtered = df[df['Tipo de Inmueble'].str.contains('INMUEBLE', case=False)]
 
 if ciudad_sel != "Todas las ciudades":
     df_filtered = df_filtered[df_filtered['Ciudad'] == ciudad_sel]
@@ -442,14 +356,12 @@ if fecha_ini and fecha_fin:
                  (df_filtered['FechaDate'] <= pd.to_datetime(fecha_fin))
     df_filtered = df_filtered[mask_fecha]
 
-
 # ================= CABECERA: LOGO + TÍTULO =================
 def header_con_logo_y_titulo():
     try:
         with open("logo2.png", "rb") as f:
             img_bytes = f.read()
         img_b64 = base64.b64encode(img_bytes).decode("utf-8")
-
         st.markdown(
             f"""
             <div class="app-header">
@@ -483,12 +395,11 @@ def header_con_logo_y_titulo():
             unsafe_allow_html=True
         )
 
-
 header_con_logo_y_titulo()
-
 
 # ================= KPIs =================
 col_k1, col_k2, col_k3, col_k4 = st.columns(4)
+
 total = len(df_filtered)
 total_0 = len(df_filtered[df_filtered["Rebaja"] == "0%"])
 total_20 = len(df_filtered[df_filtered["Rebaja"] == "20%"])
@@ -516,18 +427,14 @@ with col_k4:
 
 st.markdown("---")
 
-
 # ================= FUNCIÓN VISTA DETALLADA =================
 def mostrar_detalle(df_detalle: pd.DataFrame, titulo: str):
     """Muestra una lista de expanders con enumeración 1,2,3..."""
     st.markdown(f"### {titulo}")
-
     if df_detalle.empty:
         st.info("No hay remates para mostrar en detalle.")
         return
-
     df_detalle = df_detalle.sort_values('FechaDate')
-
     for i, (idx, row) in enumerate(df_detalle.iterrows(), start=1):
         fecha_txt = row.get('FechaFormateada') or row.get('Fecha de Remate del Inmueble', '')
         titulo_exp = (
@@ -544,10 +451,8 @@ def mostrar_detalle(df_detalle: pd.DataFrame, titulo: str):
             st.write(f"**Ciudad:** {row.get('Ciudad', 'Sin ciudad')}")
             st.write(f"**Ubicación completa:** {row.get('Ubicación', 'Sin ubicación')}")
 
-
 # ================= REMATES MÁS URGENTES =================
 st.markdown("### Remates más urgentes (Rojo y Amarillo) 🟥🟨")
-
 urgentes = df_filtered[df_filtered[''].isin(['🟥', '🟨'])].copy()
 urgentes = urgentes.sort_values('FechaDate').head(30)
 
@@ -558,15 +463,14 @@ else:
 
 st.markdown("---")
 
-
 # ================= FUNCIÓN PARA TABLAS CON FAVORITOS =================
 def marcar_favorito(df_visible: pd.DataFrame, tabla_key: str):
     """
     Muestra una tabla con:
-      - Columna N° al inicio (posición del aviso = index + 1)
-      - Columna Favorito después de N°
-      - Número de Proceso a la derecha de Fecha de Remate del Inmueble
-      - Solo la columna Favorito es editable.
+    - Columna N° al inicio (posición del aviso = index + 1)
+    - Columna Favorito después de N°
+    - Número de Proceso a la derecha de Fecha de Remate del Inmueble
+    - Solo la columna Favorito es editable.
     """
     df_visible = df_visible.copy()
 
@@ -594,9 +498,7 @@ def marcar_favorito(df_visible: pd.DataFrame, tabla_key: str):
     # Combinar ícono de color con fecha para mostrar
     display_df = df_visible.assign(
         **{
-            'Fecha de Remate del Inmueble': df_visible[''].fillna('') +
-                                           ' ' +
-                                           df_visible['Fecha de Remate del Inmueble']
+            'Fecha de Remate del Inmueble': df_visible[''].fillna('') + ' ' + df_visible['Fecha de Remate del Inmueble']
         }
     ).drop(columns=['', 'FechaDate', 'FechaFormateada', 'Ciudad'], errors='ignore')
 
@@ -611,7 +513,7 @@ def marcar_favorito(df_visible: pd.DataFrame, tabla_key: str):
                 help="Marcar como favorito"
             )
         },
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         disabled=disabled_cols,
     )
@@ -626,9 +528,7 @@ def marcar_favorito(df_visible: pd.DataFrame, tabla_key: str):
             fav_set.remove(idx)
 
     st.session_state['favoritos'] = list(fav_set)
-
     return edited
-
 
 # ================= LISTADO DE REMATES =================
 st.subheader("Listado de remates")
@@ -639,45 +539,37 @@ tab0, tab20, tabAll = st.tabs(["0% de Rebaja", "20% de Rebaja", "Todos los remat
 # ----- TAB 0% -----
 with tab0:
     st.write("Remates sin rebaja registrada.")
-
     df_0_base = df_filtered[df_filtered['Rebaja'] == '0%']
-    df_0_tabla = df_0_base
-
+    # Para la tabla, puedes omitir la columna de valor original si quieres:
+    df_0_tabla = df_0_base  # si no quieres mostrar valor, puedes hacer .drop(...)
     if df_0_tabla.empty:
         st.info("No hay remates con 0% de rebaja con los filtros actuales.")
     else:
         marcar_favorito(df_0_tabla, 'tabla0')
-
         if modo_detalle:
             mostrar_detalle(df_0_base, "Vista detallada de remates con 0% de rebaja")
 
 # ----- TAB 20% -----
 with tab20:
     st.write("Remates con rebaja del 20%.")
-
     df_20_base = df_filtered[df_filtered['Rebaja'] == '20%']
     df_20_tabla = df_20_base
-
     if df_20_tabla.empty:
         st.info("No hay remates con 20% de rebaja con los filtros actuales.")
     else:
         marcar_favorito(df_20_tabla, 'tabla20')
-
         if modo_detalle:
             mostrar_detalle(df_20_base, "Vista detallada de remates con 20% de rebaja")
 
 # ----- TAB TODOS -----
 with tabAll:
     st.write("Todos los remates que cumplen los filtros seleccionados.")
-
     if df_filtered.empty:
         st.info("No hay remates con los filtros actuales.")
     else:
         marcar_favorito(df_filtered, 'tablaAll')
-
         if modo_detalle:
             mostrar_detalle(df_filtered, "Vista detallada de todos los remates filtrados")
-
 
 # ================= SECCIÓN FAVORITOS =================
 st.markdown("---")
@@ -685,24 +577,21 @@ favoritos_actualizados = st.session_state['favoritos']
 
 if favoritos_actualizados:
     st.subheader("Remates fijados / favoritos")
-
     # Tomamos solo los favoritos desde el df filtrado actual
     favoritos_view = df_filtered.loc[df_filtered.index.intersection(favoritos_actualizados)].copy()
-
     if not favoritos_view.empty:
         # Quitamos columnas internas que no deben verse
         favoritos_view = favoritos_view.drop(
             columns=['FechaDate', 'FechaFormateada', 'Ciudad'],
             errors='ignore'
         )
-
         # Orden opcional: por índice original, para que sea estable
         favoritos_view = favoritos_view.sort_index()
 
         # Columna N° enumerada 1, 2, 3, ...
         favoritos_view.insert(0, "N°", range(1, len(favoritos_view) + 1))
 
-        # Reordenar columnas en favoritos: proceso a la derecha de fecha
+        # Reordenar columnas en favoritos
         cols = favoritos_view.columns.tolist()
         if "Número de Proceso" in cols and "Fecha de Remate del Inmueble" in cols:
             cols.remove("Número de Proceso")
@@ -710,9 +599,10 @@ if favoritos_actualizados:
             cols.insert(idx_fecha + 1, "Número de Proceso")
             favoritos_view = favoritos_view[cols]
 
+        # Mostramos la tabla SIN índice gris
         st.dataframe(
             favoritos_view,
-            use_container_width=True,
+            width="stretch",
             hide_index=True
         )
     else:
